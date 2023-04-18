@@ -63,17 +63,24 @@ def subtitle_analyse(subtitle_dir):
     print('总长度小于10的字幕数量为',min_5_cout)
 
 
+def feat_analyse(feat_dir,video_dir):
+    feat_list = os.listdir(feat_dir)
+    cout = 0
+    for video_name in tqdm(os.listdir(video_dir)):
+        if video_name.split('.')[0] + '.npy' not in feat_list:
+            print(video_name)
 #获取当前程序路径
 path = os.path.dirname(os.path.abspath(__file__))
 
-feat_dir = 'data/fusion_vid_feat/'
+fusion_feat_dir = 'data/fusion_vid_feat/'
+feat_dir = 'data/raw_vid_feat/'
 video_dir = 'data/videos/'
 subtitle_dir = 'data/subtitles'
 
+fusion_feat_path = os.path.join(path, fusion_feat_dir)
 feat_path = os.path.join(path, feat_dir)
 video_path = os.path.join(path, video_dir)
 subtitle_path = os.path.join(path, subtitle_dir)
 
-subtitle_analyse(subtitle_dir=subtitle_path)
-    
+feat_analyse(fusion_feat_path,video_path)
         

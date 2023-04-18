@@ -3,7 +3,7 @@ import os
 from torch.utils.data import Dataset
 import pandas as pd
 import numpy as np
-
+import av
     
 class MyDataset(Dataset):
     def __init__(self, json_name ,tokenizer=None):
@@ -122,40 +122,121 @@ class MyDataset(Dataset):
         res['end_second'] = end_second
         res['subtitles'] = self.get_subtitles(video_name)
         res['txt_feat'] = self.get_txt_feats(id)
-        
-        # txt_list = [question]
 
-        # for item in res['subtitles']:
-        #     txt_list.append(item['subtitle'])
-        # SEP_token = ' ' + self.tokenizer.sep_token + ' '
-        # txt = SEP_token.join(txt_list)
-        # txt_ids = self.data_tokenize(txt)
-        # res['q_srt_ids'] = torch.LongTensor(txt_ids)
+        # 计算视频的时长
+        video_path = os.path.join(self.data_root,'videos', video_name+'.mp4')
+        container = av.open(video_path)
+        seg_len=container.streams.video[0].frames 
+        frame_rate = container.streams.video[0].average_rate 
+        duration = seg_len/frame_rate # 视频秒数
+        res['duration'] = duration
+
+        
+        txt_list = [question]
+        token_types=[]
+
+        for item in res['subtitles']:
+            txt_list.append(item['subtitle'])
+        SEP_token = ' ' + self.tokenizer.sep_token + ' '
+        txt = SEP_token.join(txt_list)
+
+        txt_ids = self.data_tokenize(txt)
+
+
+        for token_id in txt_ids:
+            if token_id == self.tokenizer.sep_token_id:
+                token_types.append(1)
+            else:
+                token_types.append(0)
+        res['q_srt_ids'],l ,res['q_srt_mask']  = self.get_padded_tensor(txt_ids, max_lens = 512)
+
+        # 将token_type短的补全到512，长的截断
+        if len(token_types) > 512:
+            token_types = token_types[:512]
+        else:
+            token_types = token_types + [0] * (512 - l)
+
+        res['token_type']= torch.LongTensor(token_types)
 
         return res
 
-def collect_fn(batch):
+def calculate_iou(second1, second2, start, end):#s1<s2,start end是金标
+    union = min(second2, end) - max(second1, start)
+    inter = max(second2, end) - min(second1, start)
+    iou = 1.0 * union / inter
+    return max(0.0, iou)
+
+def calculate_iou_accuracy(ious, threshold):#ious是预测的sample的iou，threshold是阈值0.3 0.5 0.7
+    total_size = float(len(ious))
+    count = 0
+    for iou in ious:
+        if iou >= threshold:
+            count += 1
+    return float(count) / total_size * 100.0
+
+def calculate_miou(ious):#计算mIOU
+    return np.mean(ious)
+
+
+
+def collect_fn(batches):
     '''
     batch: dict
 
     '''
-    id = batch['id']
-    video_name = batch['video_name']
-    video_feats = batch['video_feats']
-    question = batch['question']
-    start_second = batch['start_second']
-    end_second = batch['end_second']
-    subtitles = batch['subtitles']
-    txt_feat = batch['txt_feat']
+    vid_features = []
+    txt_features = []
+    token_types = []
+    video_masks = []
+    txt_masks = []
+    ious = []
+    for batch in batches:
+        id = batch['id']
+        video_feats = batch['video_feats']
+        question = batch['question']
+        start_second = batch['start_second']
+        end_second = batch['end_second']
+        txt_feat = batch['txt_feat']
+        token_type = batch['token_type']
+        txt_mask = batch['q_srt_mask']
 
-    return id, video_name, video_feats, question, start_second, end_second, subtitles, txt_feat
+        # 生成768*768的方阵
+        iou = np.zeros((768, 768))
 
+        # 判断duration是否超过768，如果超过，就将start_second和end_second都除以duration//768+1
+        duration = batch['duration']
+        if duration > 768:
+            start_second = start_second // (duration//768+1)
+            end_second = end_second // (duration//768+1)
+        
+        # 在[start_second, end_second]的位置为1，其他位置为0
+        iou[start_second][end_second] = 1
+
+        ious.append(torch.FloatTensor(iou))
+        # 计算video_mask，其中非0的部分为1，0的部分为0
+        video_mask = video_feats.sum(-1) != 0
+        vid_features.append(torch.FloatTensor(video_feats))
+        txt_masks.append(txt_mask)
+        txt_features.append(txt_feat)
+        token_types.append(token_type)
+        video_masks.append(torch.LongTensor(video_mask))
+    vid_feat_res = torch.stack(vid_features, dim=0)
+    txt_feat_res = torch.stack(txt_features, dim=0)
+    token_type_res = torch.stack(token_types, dim=0)
+    video_mask_res = torch.stack(video_masks, dim=0)
+    txt_mask_res = torch.stack(txt_masks, dim=0)
+    return vid_feat_res, txt_feat_res,txt_mask_res, token_type_res, video_mask_res, ious
+    
 
 if __name__ == "__main__":
     from transformers import BertTokenizer
+    from torch.utils.data import DataLoader
 
     json_name = 'CMIVQA_Train_Dev.json'
     tokenizer = BertTokenizer.from_pretrained("hfl/chinese-roberta-wwm-ext")
 
     data = MyDataset(json_name=json_name,tokenizer=tokenizer)
-    print(data[0])
+    dataloader = DataLoader(data, batch_size=2, shuffle=True, num_workers=0, collate_fn=collect_fn)
+    for i, batch in enumerate(dataloader):
+        for item in batch:
+            print(item.shape)

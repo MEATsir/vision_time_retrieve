@@ -42,6 +42,22 @@ def sample_frame_indices(start_idx, end_idx , clip_len):
     indices = np.clip(indices, start_idx, end_idx - 1).astype(np.int64)
     return indices
 
+def pad_video_seq(sequences, max_length=1024):
+    if max_length is None:
+        max_length = max([vfeat.shape[0] for vfeat in sequences])
+    feature_length = sequences[0].shape[1]
+    sequence_padded, sequence_length = [], []
+    for seq in sequences:
+        add_length = max_length - seq.shape[0]
+        sequence_length.append(seq.shape[0])
+        if add_length > 0:
+            add_feature = np.zeros(shape=[add_length, feature_length], dtype=np.float32)
+            seq_ = np.concatenate([seq, add_feature], axis=0)
+        else:
+            seq_ = seq
+        sequence_padded.append(seq_)
+    return sequence_padded, sequence_length
+
 # 读取视频，返回以视频名字命名的特征
 def video2feat(video_path,image_processor,model, clip_len = 16):
     container = av.open(video_path)
@@ -82,6 +98,25 @@ def video2feat_dir(video_dir,feat_dir, image_processor, model, clip_len = 16):
 def vision_feat_fusion(vision_feat):
     # 按照特征第二个纬度平均
     vision_feat = vision_feat.mean(1)
+
+    # 判断vision_feat第一个纬度是否超过768
+    if vision_feat.shape[0] > 768:
+        decline_rate = vision_feat.shape[0] // 768 + 1
+
+        # 按照decline_rate进行降采样
+        # vision_feat = vision_feat[::decline_rate]
+
+        # 按照decline_rate的步长在第一维度进行平均
+        # vision_feat = vision_feat.reshape(-1, decline_rate, vision_feat.shape[1]).mean(1) 
+        new_visual_feature = []
+
+        for i in range(vision_feat.shape[0] // decline_rate ):
+            s_idx = i * decline_rate
+            e_idx = min((i + 1) * decline_rate, vision_feat.shape[0])
+            new_visual_feature.append(np.mean(vision_feat[s_idx:e_idx], axis=0))
+        vision_feat = np.asarray(new_visual_feature)
+    # 在第一维度进行0填充
+    vision_feat = np.pad(vision_feat, ((0, 768 - vision_feat.shape[0]), (0, 0)), 'constant')
     return vision_feat
 
 def video_pre_process():
@@ -135,7 +170,6 @@ def get_data(json_path):
     # 利用pandas读取json文件
     json_data = pd.read_json(json_path)
     return json_data
-
     
 def data_tokenize(txt,tokenizer):
     '''
@@ -237,4 +271,4 @@ def txt_preprocess(max_lens = 512,device = 'cuda'):
         torch.save(save , os.path.join(txt_path, save_name))
 
 if __name__ == '__main__':
-    txt_preprocess()
+    video_pre_process()

@@ -42,6 +42,22 @@ def sample_frame_indices(start_idx, end_idx , clip_len):
     indices = np.clip(indices, start_idx, end_idx - 1).astype(np.int64)
     return indices
 
+def pad_video_seq(sequences, max_length=1024):
+    if max_length is None:
+        max_length = max([vfeat.shape[0] for vfeat in sequences])
+    feature_length = sequences[0].shape[1]
+    sequence_padded, sequence_length = [], []
+    for seq in sequences:
+        add_length = max_length - seq.shape[0]
+        sequence_length.append(seq.shape[0])
+        if add_length > 0:
+            add_feature = np.zeros(shape=[add_length, feature_length], dtype=np.float32)
+            seq_ = np.concatenate([seq, add_feature], axis=0)
+        else:
+            seq_ = seq
+        sequence_padded.append(seq_)
+    return sequence_padded, sequence_length
+
 # 读取视频，返回以视频名字命名的特征
 def video2feat(video_path,image_processor,model, clip_len = 16):
     container = av.open(video_path)
@@ -82,6 +98,25 @@ def video2feat_dir(video_dir,feat_dir, image_processor, model, clip_len = 16):
 def vision_feat_fusion(vision_feat):
     # 按照特征第二个纬度平均
     vision_feat = vision_feat.mean(1)
+
+    # 判断vision_feat第一个纬度是否超过768
+    if vision_feat.shape[0] > 768:
+        decline_rate = vision_feat.shape[0] // 768 + 1
+
+        # 按照decline_rate进行降采样
+        # vision_feat = vision_feat[::decline_rate]
+
+        # 按照decline_rate的步长在第一维度进行平均
+        # vision_feat = vision_feat.reshape(-1, decline_rate, vision_feat.shape[1]).mean(1) 
+        new_visual_feature = []
+
+        for i in range(vision_feat.shape[0] // decline_rate ):
+            s_idx = i * decline_rate
+            e_idx = min((i + 1) * decline_rate, vision_feat.shape[0])
+            new_visual_feature.append(np.mean(vision_feat[s_idx:e_idx], axis=0))
+        vision_feat = np.asarray(new_visual_feature)
+    # 在第一维度进行0填充
+    vision_feat = np.pad(vision_feat, ((0, 768 - vision_feat.shape[0]), (0, 0)), 'constant')
     return vision_feat
 
 def video_pre_process():
@@ -135,7 +170,6 @@ def get_data(json_path):
     # 利用pandas读取json文件
     json_data = pd.read_json(json_path)
     return json_data
-
     
 def data_tokenize(txt,tokenizer):
     '''
@@ -189,7 +223,7 @@ def get_subtitles(data_root, video_name):
             res.append(mid_res) 
     return res
 
-def txt_preprocess(max_lens = 512,device = 'cuda'):
+def q_srt_preprocess(max_lens = 512,device = 'cuda'):
     # 当前路径
     cur_path = os.path.dirname(os.path.abspath(__file__))
     subtitle_pth = os.path.join(cur_path, 'data/subtitles/')
@@ -207,7 +241,7 @@ def txt_preprocess(max_lens = 512,device = 'cuda'):
     model.eval()
 
     # 创建txt_feat文件夹
-    txt_path = os.path.join(cur_path, 'data/txt_feat/')
+    txt_path = os.path.join(cur_path, 'data/q_srts_feat/')
     if not os.path.exists(txt_path):
         os.mkdir(txt_path)
     
@@ -235,6 +269,77 @@ def txt_preprocess(max_lens = 512,device = 'cuda'):
 
         save_name ='q_subtitle_' + str(id) + '.pt'
         torch.save(save , os.path.join(txt_path, save_name))
+    
+
+def padding_q_and_srt(max_lens = 512,device = 'cuda'):
+    cur_path = os.path.dirname(os.path.abspath(__file__))
+    subtitle_pth = os.path.join(cur_path, 'data/subtitles/')
+
+    # 读取json文件
+    json_path = os.path.join(cur_path, 'data/CMIVQA_Train_Dev.json')
+    json_data = get_data(json_path)
+
+    # 读取预训练模型,并冻结参数
+    tokenizer = BertTokenizer.from_pretrained("hfl/chinese-roberta-wwm-ext")
+    model = BertModel.from_pretrained("hfl/chinese-roberta-wwm-ext")
+    for para in model.parameters():
+        para.requires_grad = False
+    model.to(device)
+    model.eval()
+
+    # 创建subtitles_feat文件夹
+    subtitles_feat_path = os.path.join(cur_path, 'data/pad_subtitles_feat/')
+    if not os.path.exists(subtitles_feat_path):
+        os.mkdir(subtitles_feat_path)  
+    
+    # 创建q_feat文件夹
+    q_feat_path = os.path.join(cur_path, 'data/pad_q_feat/')
+    if not os.path.exists(q_feat_path):
+        os.mkdir(q_feat_path)
+    
+    # 遍历videos文件夹，获取视频名称
+    videos = os.listdir(subtitle_pth)
+    videos = [video.split('.')[0]+'.mp4' for video in videos]
+
+    # 按照视频名称读取字幕文件
+    for video in tqdm(videos):
+        subtitles = get_subtitles(subtitle_pth, video)
+        txt_list = []
+        for item in subtitles:
+            txt_list.append(item['subtitle'])
+        SEP_token = ' ' + tokenizer.sep_token + ' '
+        txt = SEP_token.join(txt_list)
+        txt_ids = data_tokenize(txt,tokenizer=tokenizer)
+        txt_ids, length, mask = get_padded_tensor(txt_ids, tokenizer, max_lens)
+
+        input_ids = txt_ids.unsqueeze(0).to(device)
+        mask = mask.unsqueeze(0).to(device)
+
+        output = model(input_ids, attention_mask = mask)
+        save = output.last_hidden_state.squeeze(0)
+
+        save_name ='pad_subtitle_' + video.split('.')[0] + '.pt'
+        torch.save(save , os.path.join(subtitles_feat_path, save_name))
+
+    
+    for idx in tqdm(range(len(json_data))):
+        data = []
+        for key in json_data.keys():
+            data.append(json_data[key][idx])
+        id , video_name, question, start_second, end_second = data
+
+        q_ids = data_tokenize(question,tokenizer=tokenizer)
+        q_ids, length, mask = get_padded_tensor(q_ids, tokenizer, 52)
+
+        input_ids = q_ids.unsqueeze(0).to(device)
+        mask = mask.unsqueeze(0).to(device)
+
+        output = model(input_ids, attention_mask = mask)
+        save = output.last_hidden_state.squeeze(0)
+
+        save_name ='pad_question_' + str(id) + '.pt'
+        torch.save(save , os.path.join(q_feat_path, save_name))
+
 
 if __name__ == '__main__':
-    txt_preprocess()
+    padding_q_and_srt()

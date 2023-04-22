@@ -164,7 +164,8 @@ def video_pre_process():
 # 2、处理文本特征
 
 import pandas as pd
-from transformers import BertTokenizer, BertModel
+import jieba_fast
+from transformers import BertTokenizer, BertModel,BigBirdTokenizer,BigBirdModel
 
 def get_data(json_path):
     # 利用pandas读取json文件
@@ -223,6 +224,23 @@ def get_subtitles(data_root, video_name):
             res.append(mid_res) 
     return res
 
+
+
+class JiebaTokenizer(BertTokenizer):
+    def __init__(
+        self, pre_tokenizer=lambda x: jieba_fast.cut(x, HMM=False), *args, **kwargs
+    ):
+        super().__init__(*args, **kwargs)
+        self.pre_tokenizer = pre_tokenizer
+    def _tokenize(self, text, *arg, **kwargs):
+        split_tokens = []
+        for word in self.pre_tokenizer(text):
+            if word in self.vocab:
+                split_tokens.append(word)
+            else:
+                split_tokens.extend(super()._tokenize(word))
+        return split_tokens
+
 def q_srt_preprocess(max_lens = 512,device = 'cuda'):
     # 当前路径
     cur_path = os.path.dirname(os.path.abspath(__file__))
@@ -280,8 +298,8 @@ def padding_q_and_srt(max_lens = 512,device = 'cuda'):
     json_data = get_data(json_path)
 
     # 读取预训练模型,并冻结参数
-    tokenizer = BertTokenizer.from_pretrained("hfl/chinese-roberta-wwm-ext")
-    model = BertModel.from_pretrained("hfl/chinese-roberta-wwm-ext")
+    tokenizer = JiebaTokenizer.from_pretrained('Lowin/chinese-bigbird-base-4096')
+    model = BigBirdModel.from_pretrained('Lowin/chinese-bigbird-base-4096')
     for para in model.parameters():
         para.requires_grad = False
     model.to(device)
@@ -310,7 +328,7 @@ def padding_q_and_srt(max_lens = 512,device = 'cuda'):
         SEP_token = ' ' + tokenizer.sep_token + ' '
         txt = SEP_token.join(txt_list)
         txt_ids = data_tokenize(txt,tokenizer=tokenizer)
-        txt_ids, length, mask = get_padded_tensor(txt_ids, tokenizer, max_lens)
+        txt_ids, length, mask = get_padded_tensor(txt_ids, tokenizer, max_lens = 4096)
 
         input_ids = txt_ids.unsqueeze(0).to(device)
         mask = mask.unsqueeze(0).to(device)

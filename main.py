@@ -61,20 +61,61 @@ def log_start():
 
     return log_path
 
-def train_model(model,optimizer,scaler,scheduler,train_loader):  # 训练一个epoch
+
+def calculate_batch_iou(start_bs,end_bs, start_t, end_t):#s1<s2,start end是金标
+    iou = 0
+    for i in range(len(start_bs)):
+        second1 = start_bs[i]
+        second2 = end_bs[i]
+        start = start_t[i]
+        end = end_t[i]
+        union = min(second2, end) - max(second1, start)
+        inter = max(second2, end) - min(second1, start)
+        iou += 1.0 * max(union / inter,0)
+    return max(0.0, iou/len(start_bs))
+
+
+def train_model(model,optimizer,criterion ,scaler,scheduler,train_loader,save_pth):  # 训练一个epoch
     model.train()
 
     losses = AverageMeter()
     optimizer.zero_grad()
 
     tk = tqdm(train_loader, total=len(train_loader), position=0, leave=True)
-    for step, (vid_feat, q_feat,q_mask, sub_feat, sub_mask, video_mask, ious, strat_tgt ,end_tgt) in enumerate(tk):
+
+    max_iou = 0
+    iou_sum = 0
+    for step, (vid_feat, q_feat,q_mask,sub_ids, sub_feat, sub_mask, video_mask, ious, strat1_tgt ,start2_tgt,end1_tgt,end2_tgt,test) in enumerate(tk):
         with autocast():
-            output = model(q_feat,q_mask,sub_feat,sub_mask,
-                          ious=ious,vfeats=vid_feat,vfeats_mask=video_mask,start_tgt=strat_tgt,end_tgt=end_tgt)
+            output = model(q_feat,q_mask,sub_ids,sub_feat,sub_mask,
+                          ious=ious,vfeats=vid_feat,vfeats_mask=video_mask,start1_tgt=strat1_tgt,start2_tgt = start2_tgt,end1_tgt=end1_tgt,end2_tgt=end2_tgt)
 
 
-        loss = sum(output)
+        start1_logits,start2_logits,end1_logits,end2_logits = output
+        loss = 0.7*(criterion(start1_logits,strat1_tgt) + criterion(end1_logits,end1_tgt))+0.3*(criterion(start2_logits,start2_tgt)+criterion(end2_logits,end2_tgt))
+
+
+        # 层次化分类目标还原
+        start1_p = (torch.max(start1_logits,dim =1)[1].to('cpu').numpy()+1)%32
+        start2_p = (torch.max(start2_logits,dim =1)[1].to('cpu').numpy()+1) % 24 
+        end1_p = (torch.max(end1_logits,dim =1)[1].to('cpu').numpy()+1) %32
+        end2_p = (torch.max(end2_logits,dim =1)[1].to('cpu').numpy()+1) % 24
+
+        start1_t = (torch.max(strat1_tgt, dim=1)[1].to('cpu').numpy() +1) % 32
+        start2_t = (torch.max(start2_tgt, dim=1)[1].to('cpu').numpy()+1)%24
+        end1_t = (torch.max(end1_tgt, dim=1)[1].to('cpu').numpy()+1) %32
+        end2_t = (torch.max(end2_tgt, dim=1)[1].to('cpu').numpy()+1)%24
+        
+
+        start_pred = 24 * start1_p + start2_p
+        end_pred = 24 * end1_p + end2_p
+        start_true = 24* start1_t + start2_t
+        end_true = 24 *  end1_t + end2_t
+        iou = calculate_batch_iou(start_pred,end_pred,start_true,end_true)
+        iou_sum += iou
+
+        # 还原结束
+
         scaler.scale(loss).backward()
 
         if ((step + 1) % CFG['accum_iter'] == 0) or ((step + 1) == len(train_loader)):  # 梯度累加
@@ -83,11 +124,15 @@ def train_model(model,optimizer,scaler,scheduler,train_loader):  # 训练一个e
             optimizer.zero_grad()
             scheduler.step()
         losses.update(loss.item())
-        tk.set_postfix(loss=losses.avg)
-        if step == 0:
-            log(['Start Train:','Now epoch:{}'.format(epoch),'Now Loss：{}'.format(str(loss.item())),'all of the step:{}'.format(len(tk))],path)
+        tk.set_postfix(loss=loss.item())
 
-    log(['Now Loss：{}'.format(str(loss.item())),'Avg Loss：{}'.format(losses.avg),'End this round of training'],path)
+    # 如果miou大于之前的最大值，保存模型
+    if iou_sum/len(train_loader) > max_iou:
+        max_iou = iou_sum/len(train_loader)
+        torch.save(model.state_dict(), os.path.join(save_pth, 'model_{}.pth'.format(epoch)))
+    log(['Start Train:','Now epoch:{}'.format(epoch),'Now Loss：{}'.format(str(loss.item())),'Avg Loss：{}'.format(losses.avg),'miou:{}'.format(iou_sum/len(train_loader)),'End this round of training'],path)
+    
+    
     return losses.avg
 
 def seed_everything(seed):
@@ -101,20 +146,23 @@ def seed_everything(seed):
     torch.backends.cudnn.benchmark = False
 
 if __name__ == '__main__':
+    from pre_process import JiebaTokenizer
 
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--shape", default='base', type=str)
-    parser.add_argument("--seed", default=2, type=int)
+    parser.add_argument("--seed", default=2023, type=int)
     parser.add_argument("--maxlen", default=1300, type=int)
-    parser.add_argument("--epochs", default=32, type=int)
-    parser.add_argument("--batchsize", default=8, type=int)
-    parser.add_argument("--lr", default=0.1, type=float)
+    parser.add_argument("--epochs", default=2000, type=int)
+
+    parser.add_argument("--batchsize", default=3, type=int)
+
+    parser.add_argument("--lr", default=0.0001, type=float)
     parser.add_argument("--num_workers", default=0, type=int)
-    parser.add_argument("--weight_decay", default=0, type=float)
-    parser.add_argument("--device", default=1, type=float)
+    parser.add_argument("--weight_decay", default=0.00001, type=float)
+    parser.add_argument("--device", default=6, type=float)
     parser.add_argument("--json_name",default='CMIVQA_Train_Dev.json' ,type=str)
-    parser.add_argument('--tokenizer',default="hfl/chinese-roberta-wwm-ext",type=str)
+    parser.add_argument('--tokenizer',default="Lowin/chinese-bigbird-base-4096",type=str)
     args = parser.parse_args()
     CFG = {
         'seed': args.seed,
@@ -127,6 +175,7 @@ if __name__ == '__main__':
         'accum_iter': args.batchsize,
         'weight_decay': args.weight_decay,
         'device': args.device,
+        'save_pth': '/home/bma/CMIVQA/checkpoint/',
     }
 
     accelerator = Accelerator()
@@ -134,7 +183,7 @@ if __name__ == '__main__':
     torch.cuda.set_device(CFG['device'])
     device = accelerator.device
 
-    tokenizer = BertTokenizer.from_pretrained(args.tokenizer)
+    tokenizer = JiebaTokenizer.from_pretrained(args.tokenizer)
 
     train_data = MyDataset(args.json_name,tokenizer=tokenizer)
     train_loader = DataLoader(train_data,args.batchsize,True,collate_fn=collect_fn)
@@ -155,6 +204,6 @@ if __name__ == '__main__':
     path = log_start()
     log(get_args(args),path)
 
-    
+    save_pth = CFG['save_pth']
     for epoch in range(CFG['epochs']):
-        train_model(model,optimizer,scaler,scheduler,train_loader)
+        train_model(model,optimizer,criterion,scaler,scheduler,train_loader,save_pth=save_pth)

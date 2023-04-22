@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-
+from transformers import BigBirdModel
 
 
 def mask_logits(inputs, mask, mask_value=-1e30):
@@ -154,60 +154,72 @@ class CrossAttention(nn.Module):
 class SpanExtraction(nn.Module):
     def __init__(self, dim=768):
         super(SpanExtraction, self).__init__()
+        self.P_encoder = BigBirdModel.from_pretrained('Lowin/chinese-bigbird-base-4096')
         self.cross_att = nn.MultiheadAttention(dim, num_heads=8)
         self.q_v_att = nn.MultiheadAttention(dim, num_heads=8)
         self.conv1 = nn.Conv1d(in_channels=1536, out_channels=768, kernel_size=3, padding=1)
         self.conv2 = nn.Conv1d(in_channels=1536, out_channels=768, kernel_size=3, padding=1)
         self.Dropout = nn.Dropout(0.1)
-        self.fc_start = nn.Linear(52, dim)
-        self.fc_end = nn.Linear(52, dim)
+        self.averagepooling = nn.AdaptiveAvgPool1d(1)
+
+        self.fc_start1 = nn.Linear(dim, 32)
+        self.fc_end1 = nn.Linear(dim, 32)
+        self.fc_start2 = nn.Linear(32+dim, 24)
+        self.fc_end2 = nn.Linear(32+dim, 24)
+
         self.softmax = nn.Softmax(dim=-1)
         self.entropys = nn.CrossEntropyLoss()
         self.relu = nn.ReLU()
 
 
-    def forward(self,q_feat, q_mask,sub_feat,sub_msk,ious=None,vfeats=None,vfeats_mask=None,start_tgt=None,end_tgt=None):
+    def forward(self,q_feat, q_mask,sub_ids,sub_feat,sub_msk,ious=None,vfeats=None,vfeats_mask=None,start1_tgt=None,start2_tgt=None,end1_tgt=None,end2_tgt=None):
         # txt_feat: (batch_size, txt_seq_len, txt_dim)
         # attention_mask: (batch_size, txt_seq_len)
 
-        sub_feat = self.Dropout(sub_feat) # [1,512,768]
-        vfeats = self.Dropout(vfeats) # [1,768,768]
+        sub_feat = self.Dropout(sub_feat) # [1,4096,768]
 
         # cross_att_out: (batch_size, seq_len, hidden_dim) [512, 1, 768]
 
-        sf = sub_feat.transpose(0, 1)
-        cross_att_out, _ = self.cross_att(sub_feat.transpose(0, 1),
-                                            vfeats.transpose(0, 1),
-                                            vfeats.transpose(0, 1),
-                                            key_padding_mask=vfeats_mask)
+        cross_att_out, _ = self.cross_att(q_feat.transpose(0, 1),
+                                            sub_feat.transpose(0, 1),
+                                            sub_feat.transpose(0, 1))
         
         
         cross_att_out = cross_att_out.transpose(0, 1)
 
 
         # concat_out: (batch_size, seq_len, hidden_dim*2)
-        concat_out = torch.cat([sub_feat, cross_att_out], dim=-1) # [1,512,1536]
+        concat_out = torch.cat([q_feat, cross_att_out], dim=-1) # [1,512,1536]
 
 
         # 将[512,1536] 降维到[512,768]
         concat_out = self.conv1(concat_out.transpose(1,2)).transpose(1,2) # [1,512,768]
-        q_v_att_out, _ = self.q_v_att(q_feat.transpose(0, 1),
-                                            concat_out.transpose(0, 1),
-                                            concat_out.transpose(0, 1)) # [52, 1, 768 ]
+        concat_out = self.relu(concat_out)
+
+        # q_v_att_out, _ = self.q_v_att(concat_out.transpose(0, 1),
+        #                                     q_feat.transpose(0, 1),
+        #                                     q_feat.transpose(0, 1)) # [52, 1, 768 ]
         
-        q_v_att_out = q_v_att_out.transpose(0, 1) # [1, 52, 768]
-        q_v_concat_out = torch.cat([q_feat, q_v_att_out], dim=-1) # [1, 52, 1536]
-        q_v_concat_out = self.conv2(q_v_concat_out.transpose(1,2)).transpose(1,2)
+        # q_v_att_out = q_v_att_out.transpose(0, 1) # [1, 52, 768]
+        # q_v_concat_out = torch.cat([concat_out, q_v_att_out], dim=-1) # [1, 52, 1536]
+        # q_v_concat_out = self.conv2(q_v_concat_out.transpose(1,2)).transpose(1,2)
+        # q_v_concat_out = self.relu(q_v_concat_out)
         
-        x = q_v_concat_out.transpose(1, 2)  # 将序列长度维度移动到第3维
-        start = self.fc_start(x).squeeze(-1)  # [1, 768]
-        end = self.fc_end(x).squeeze(-1)  # [1, 768]
-        start_logits = self.softmax(start)  # [1, 768]
-        end_logits = self.softmax(end)  # [1, 768]
-        if start is not None and end is not None:
-            start_loss = self.entropys(start_logits, start_tgt)
-            end_loss = self.entropys(end_logits, end_tgt)
-            return start_loss, end_loss
-        return start_logits, end_logits
+        x = concat_out.transpose(1, 2)  # 将序列长度维度移动到第3维.
+        x = self.averagepooling(x).squeeze(-1)  # [1, 768]
+        
+        start1 = self.fc_start1(x).squeeze(-1)  # [1, 32]
+        end1 = self.fc_end1(x).squeeze(-1)  # [1, 32]
+
+        start2 = self.fc_start2(torch.cat([x,start1],dim=-1)).squeeze(-1)  # [1, 24]
+        end2 = self.fc_end2(torch.cat([x,end1],dim = -1)).squeeze(-1)  # [1, 24]
+
+        start1_logits = self.softmax(start1)  # [1, 32]
+        end1_logits = self.softmax(end1)  # [1, 32]
+
+        start2_logits = self.softmax(start2)  # [1, 24]
+        end2_logits = self.softmax(end2)  # [1, 24]
+
+        return start1_logits, start2_logits, end1_logits, end2_logits
 
 

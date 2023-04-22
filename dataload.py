@@ -148,9 +148,10 @@ class MyDataset(Dataset):
         SEP_token = ' ' + self.tokenizer.sep_token + ' '
         subs = SEP_token.join(sub_list)
         sub_ids = self.data_tokenize(subs)
-        sub_ids, length, sub_mask = self.get_padded_tensor(sub_ids, max_lens = 512)
-        res['sub_msk'] = sub_mask
+        sub_ids, length, sub_mask = self.get_padded_tensor(sub_ids, max_lens = 4096)
 
+        res['sub_msk'] = sub_mask
+        res['subtitles_ids'] = sub_ids
         q_ids = self.data_tokenize(question)
         q_ids, length, q_mask = self.get_padded_tensor(q_ids, max_lens = 52)
         res['q_msk'] = q_mask
@@ -184,47 +185,65 @@ def collect_fn(batches):
     vid_features = []
     q_features = []
     sub_features = []
+    sub_idss = []
     q_masks = []
     sub_masks = []
     token_types = []
     video_masks = []
     txt_masks = []
-    start_seconds = []
-    end_seconds = []
+    start_seconds1 = []
+    start_seconds2 = []
+    end_seconds1 = []
+    end_seconds2 = []
     ious = []
+
+
+    test = []
     for batch in batches:
         id = batch['id']
         video_feats = batch['video_feats']
         question = batch['question']
+        sub_ids = batch['subtitles_ids']
         start_second = batch['start_second']
         end_second = batch['end_second']
         q_feat = batch['q_feat']
         sub_feat = batch['sub_feat']
         q_mask = batch['q_msk']
         sub_mask = batch['sub_msk']
+        subtitles = batch['subtitles']
 
-        # 生成768*768的方阵
-        iou = np.zeros((768, 768))
+
+        
 
         # 判断duration是否超过768，如果超过，就将start_second和end_second都除以duration//768+1
         duration = batch['duration']
         if duration > 768:
             start_second = start_second // (duration//768+1)
             end_second = end_second // (duration//768+1)
+        start_second = int(start_second)
+        end_second = int(end_second)
 
-        # 生成长度为768的向量，其中start_second的位置为1，其他位置为0
-        start_ls = [0] * 768
-        start_ls[start_second] = 1
-        # 生成长度为768的向量，其中end_second的位置为1，其他位置为0
-        end_ls = [0] * 768
-        end_ls[end_second] = 1
-        
-        # 在[start_second, end_second]的位置为1，其他位置为0
-        iou[start_second][end_second] = 1
+        if start_second > end_second:
+            # 将两者互换
+            start_second, end_second = end_second, start_second
 
-        ious.append(torch.FloatTensor(iou))
-        start_seconds.append(torch.LongTensor(start_ls))
-        end_seconds.append(torch.LongTensor(end_ls))
+
+
+        start_second1 = [0]*32
+        start_second2 = [0]*24
+        end_second1 = [0]*32
+        end_second2 = [0]*24
+
+        start_second1[start_second//24-1] = 1
+        start_second2[start_second%24-1] = 1
+        end_second1[end_second//24-1] = 1
+        end_second2[end_second%24-1] = 1
+
+        start_seconds1.append(torch.FloatTensor(start_second1))
+        start_seconds2.append(torch.FloatTensor(start_second2))
+        end_seconds1.append(torch.FloatTensor(end_second1))
+        end_seconds2.append(torch.FloatTensor(end_second2))
+
         # 计算video_mask，其中非0的部分为1，0的部分为0
         video_mask = video_feats.sum(-1) != 0
         vid_features.append(torch.FloatTensor(video_feats))
@@ -232,17 +251,25 @@ def collect_fn(batches):
         sub_features.append(sub_feat)
         q_masks.append(q_mask)
         sub_masks.append(sub_mask)
+        sub_idss.append(sub_ids)
         video_masks.append(torch.FloatTensor(video_mask))
+        test.append([start_second,end_second])
+
+
+    start_seconds1_res = torch.stack(start_seconds1, dim=0)
+    start_seconds2_res = torch.stack(start_seconds2, dim=0)
+    end_seconds1_res = torch.stack(end_seconds1, dim=0)
+    end_seconds2_res = torch.stack(end_seconds2, dim=0)
+    sub_ids_res = torch.stack(sub_idss, dim=0)
     vid_feat_res = torch.stack(vid_features, dim=0)
     q_feat_res = torch.stack(q_features, dim=0)
     sub_feat_res = torch.stack(sub_features, dim=0)
     q_mask_res = torch.stack(q_masks, dim=0)
     sub_mask_res = torch.stack(sub_masks, dim=0)
     video_mask_res = torch.stack(video_masks, dim=0)
-    start_seconds_res = torch.stack(start_seconds, dim=0)
-    end_seconds_res = torch.stack(end_seconds, dim=0)
 
-    return vid_feat_res, q_feat_res,q_mask_res, sub_feat_res, sub_mask_res, video_mask_res, ious, start_seconds_res, end_seconds_res
+
+    return vid_feat_res, q_feat_res,q_mask_res, sub_ids_res,sub_feat_res, sub_mask_res, video_mask_res, ious, start_seconds1_res, start_seconds2_res, end_seconds1_res, end_seconds2_res,test
     
 
 if __name__ == "__main__":

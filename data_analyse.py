@@ -89,10 +89,15 @@ raw_feat_dir = 'data/raw_vid_feat/'
 feat_dir = 'data/raw_vid_feat/'
 subtitle_dir = 'data/subtitles'
 
+video_test_dir = 'testA/videos'
+
 fusion_feat_path = os.path.join(path, fusion_feat_dir)
 raw_feat_path = os.path.join(path, raw_feat_dir)
 feat_path = os.path.join(path, feat_dir)
 subtitle_path = os.path.join(path, subtitle_dir)
 
+video_test_path = os.path.join(path, video_test_dir)
 
-subtitle_analyse(subtitle_path)
+video_analyse(video_test_path)
+
+
